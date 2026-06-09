@@ -2,9 +2,11 @@ from flask import Flask, request, jsonify
 from store_vectors import create_vector_store
 import json,asyncio
 from flask_cors import CORS
+from dotenv import load_dotenv, find_dotenv
 import os
+load_dotenv(find_dotenv())
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:3000"])
+CORS(app, origins=[os.getenv("FRONTEND_URI")])
 UPLOAD_FOLDER = "uploads"
 
 os.makedirs(
