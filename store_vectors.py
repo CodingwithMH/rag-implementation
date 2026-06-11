@@ -1,25 +1,32 @@
 import asyncio
 import os
-import pickle
-
 from dotenv import load_dotenv
 from google import genai
 from pypdf import PdfReader
-
-import faiss
-import numpy as np
+from pinecone import Pinecone
 
 load_dotenv()
 
+# Gemini Client
 client = genai.Client(
     api_key=os.getenv("GEMINI_API_KEY")
 )
 
-INDEX_FILE = "vector_store.index"
-DOCS_FILE = "documents.pkl"
+# Pinecone Client
+pc = Pinecone(
+    api_key=os.getenv("PINECONE_API_KEY")
+)
+
+index = pc.Index(
+    os.getenv("PINECONE_INDEX")
+)
 
 
 async def get_embedding(text: str):
+    """
+    Generate embedding using Gemini
+    """
+
     response = await client.aio.models.embed_content(
         model="models/gemini-embedding-2",
         contents=text
@@ -29,6 +36,10 @@ async def get_embedding(text: str):
 
 
 def extract_pdf_text(pdf_path: str) -> str:
+    """
+    Extract all text from PDF
+    """
+
     reader = PdfReader(pdf_path)
 
     text = ""
@@ -47,6 +58,10 @@ def chunk_text(
     chunk_size: int = 1000,
     overlap: int = 200
 ):
+    """
+    Split text into overlapping chunks
+    """
+
     chunks = []
 
     start = 0
@@ -65,11 +80,12 @@ def chunk_text(
 
 
 async def create_vector_store(pdf_path: str):
+    """
+    Extract PDF text and upload embeddings to Pinecone
+    """
 
-    # Extract text
     text = extract_pdf_text(pdf_path)
 
-    # Split into chunks
     chunks = chunk_text(text)
 
     if not chunks:
@@ -77,50 +93,52 @@ async def create_vector_store(pdf_path: str):
 
     print(f"Created {len(chunks)} chunks")
 
-    embeddings = []
+    vectors_to_upsert = []
+
+    filename = os.path.basename(pdf_path)
 
     for i, chunk in enumerate(chunks):
-        print(f"Embedding chunk {i+1}/{len(chunks)}")
+
+        print(f"Embedding chunk {i + 1}/{len(chunks)}")
 
         embedding = await get_embedding(chunk)
-        embeddings.append(embedding)
 
-    vectors = np.array(
-        embeddings,
-        dtype=np.float32
-    )
+        vectors_to_upsert.append(
+            {
+                "id": f"{filename}-{i}",
+                "values": embedding,
+                "metadata": {
+                    "source": filename,
+                    "chunk_number": i,
+                    "text": chunk
+                }
+            }
+        )
 
-    dimension = vectors.shape[1]
+    print("Uploading vectors to Pinecone...")
 
-    index = faiss.IndexFlatL2(dimension)
+    batch_size = 100
 
-    index.add(vectors)
+    for i in range(0, len(vectors_to_upsert), batch_size):
 
-    faiss.write_index(
-        index,
-        INDEX_FILE
-    )
+        batch = vectors_to_upsert[i:i + batch_size]
 
-    metadata = []
-
-    for idx, chunk in enumerate(chunks):
-        metadata.append({
-            "chunk_id": idx,
-            "source": os.path.basename(pdf_path),
-            "text": chunk
-        })
-
-    with open(DOCS_FILE, "wb") as f:
-        pickle.dump(metadata, f)
+        index.upsert(
+            vectors=batch
+        )
 
     print(
-        f"Successfully stored {index.ntotal} chunks"
+        f"Successfully stored {len(vectors_to_upsert)} chunks from {filename}"
     )
+
+    return {
+        "status": "success",
+        "chunks_uploaded": len(vectors_to_upsert),
+        "source": filename
+    }
 
 
 if __name__ == "__main__":
     asyncio.run(
-        create_vector_store(
-            "sample.pdf"
-        )
+        create_vector_store("sample.pdf")
     )

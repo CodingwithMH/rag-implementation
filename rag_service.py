@@ -1,28 +1,29 @@
 import os
-import pickle
-
-import faiss
-import numpy as np
-
 from dotenv import load_dotenv
 from google import genai
+from pinecone import Pinecone
 
 load_dotenv()
 
+# Gemini Client
 client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY2")
+    api_key=os.getenv("GEMINI_API_KEY")
 )
 
-INDEX_FILE = "vector_store.index"
-DOCS_FILE = "documents.pkl"
+# Pinecone Client
+pc = Pinecone(
+    api_key=os.getenv("PINECONE_API_KEY")
+)
 
-index = faiss.read_index(INDEX_FILE)
-
-with open(DOCS_FILE, "rb") as f:
-    documents = pickle.load(f)
+index = pc.Index(
+    os.getenv("PINECONE_INDEX")
+)
 
 
 async def get_embedding(text: str):
+    """
+    Generate embedding using Gemini
+    """
 
     response = await client.aio.models.embed_content(
         model="models/gemini-embedding-2",
@@ -33,35 +34,44 @@ async def get_embedding(text: str):
 
 
 async def ask_rag(question: str):
+    """
+    Search Pinecone and generate answer
+    """
 
-    query_embedding = await get_embedding(
-        question
-    )
+    query_embedding = await get_embedding(question)
 
-    query_vector = np.array(
-        [query_embedding],
-        dtype=np.float32
-    )
-
-    distances, indices = index.search(
-        query_vector,
-        k=3
+    results = index.query(
+        vector=query_embedding,
+        top_k=3,
+        include_metadata=True
     )
 
     retrieved_chunks = []
 
-    for idx in indices[0]:
-        if idx != -1:
-            retrieved_chunks.append(
-                documents[idx]["text"]
-            )
+    if results.matches:
+        for match in results.matches:
+            metadata = match.metadata
 
-    context = "\n\n".join(
-        retrieved_chunks
-    )
+            if metadata and "text" in metadata:
+                retrieved_chunks.append(
+                    metadata["text"]
+                )
+
+    if not retrieved_chunks:
+        return {
+            "question": question,
+            "answer": "No relevant context was found in the database.",
+            "retrieved_chunks": []
+        }
+
+    context = "\n\n".join(retrieved_chunks)
 
     prompt = f"""
 Answer the question using ONLY the provided context.
+
+If the answer is not present in the context, respond:
+
+"I cannot find the answer in the provided documents."
 
 Context:
 {context}
